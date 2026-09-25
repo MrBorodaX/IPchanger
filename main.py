@@ -1,8 +1,10 @@
 import sys
 import json
 import os
+import time
 import ipaddress
 import subprocess
+from dataclasses import dataclass, field
 import re
 import ctypes
 from PySide6 import QtWidgets, QtCore, QtGui
@@ -47,15 +49,15 @@ def is_admin():
         return False
 
 
+@dataclass
+class NetworkSnapshot:
+    adapters: list = field(default_factory=list)
+    active: dict = field(default_factory=dict)
+    timestamp: float = 0.0
+
+
 class NetworkManager:
-    """Быстрый доступ к сети Windows с кэшированием результатов.
-
-    GUI не должен запускать PowerShell при создании/изменении карточек.
-    Дорогие запросы выполняются только при обновлении состояния сети.
-    """
-
-    _interfaces_cache = None
-    _active_cache = None
+    """Быстрый доступ к сетевым адаптерам Windows."""
 
     @staticmethod
     def _powershell_json(script):
@@ -81,28 +83,21 @@ class NetworkManager:
             print(f"Ошибка PowerShell: {exc}")
             return None
 
-    @classmethod
-    def get_interfaces(cls, force=False):
-        if cls._interfaces_cache is not None and not force:
-            return list(cls._interfaces_cache)
+    @staticmethod
+    def get_interfaces():
         script = """
 $items = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
 @($items) | ConvertTo-Json -Compress
 """
-        data = cls._powershell_json(script)
+        data = NetworkManager._powershell_json(script)
         if data is None:
-            return list(cls._interfaces_cache or [])
+            return []
         if isinstance(data, str):
-            result = [data] if data.strip() else []
-        else:
-            result = [str(x) for x in data if str(x).strip()]
-        cls._interfaces_cache = result
-        return list(result)
+            return [data]
+        return [str(x) for x in data if str(x).strip()]
 
-    @classmethod
-    def get_all_active_configs(cls, force=False):
-        if cls._active_cache is not None and not force:
-            return [dict(x) for x in cls._active_cache]
+    @staticmethod
+    def get_all_active_configs():
         script = """
 $result = foreach ($a in Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object {$_.Status -eq 'Up'}) {
     $ipObj = Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
@@ -124,7 +119,7 @@ if ($null -eq $result) { @() | ConvertTo-Json -Compress } else { @($result) | Co
 """
         data = NetworkManager._powershell_json(script)
         if data is None:
-            return [dict(x) for x in (cls._active_cache or [])]
+            return []
         if isinstance(data, dict):
             data = [data]
         active = []
@@ -144,10 +139,8 @@ if ($null -eq $result) { @() | ConvertTo-Json -Compress } else { @($result) | Co
                 'mask': mask,
                 'gateway': str(item.get('gateway') or ''),
                 'dhcp': bool(item.get('dhcp', False)),
-                'status': str(item.get('status') or 'Up'),
             })
-        cls._active_cache = active
-        return [dict(x) for x in active]
+        return active
 
     @staticmethod
     def get_interface_config(interface):
@@ -190,7 +183,6 @@ $ipIf = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -Error
                 command = ['netsh', 'interface', 'ip', 'set', 'address', f'name={interface}', 'static', ip, mask, 'none']
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=subprocess.CREATE_NO_WINDOW, check=False)
             if result.returncode == 0:
-                NetworkManager.invalidate_cache()
                 return True, None
             error = result.stderr.decode('cp866', errors='replace').strip() or result.stdout.decode('cp866', errors='replace').strip()
             return False, error
@@ -209,63 +201,56 @@ $ipIf = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -Error
         except Exception as e:
             return False, str(e)
 
-    @classmethod
-    def invalidate_cache(cls):
-        cls._interfaces_cache = None
-        cls._active_cache = None
-
-    @classmethod
-    def check_subnet_overlap(cls, interface, ip, mask):
-        try:
-            target = ipaddress.ip_network(f"{ip}/{mask}", strict=False)
-        except ValueError:
-            return False
-        for item in cls.get_all_active_configs():
-            if item.get('interface') == interface or not item.get('ip') or not item.get('mask'):
-                continue
-            try:
-                other = ipaddress.ip_network(f"{item['ip']}/{item['mask']}", strict=False)
-                if target.overlaps(other):
-                    return True
-            except ValueError:
-                continue
-        return False
-
-    @classmethod
-    def get_gateway_for_interface(cls, interface):
-        for item in cls.get_all_active_configs():
-            if item.get('interface') == interface:
-                return item.get('gateway', '')
-        return ''
 
     @staticmethod
     def ping_host(target):
+        """Открывает отдельную консоль Windows и выполняет ping."""
         try:
-            result = subprocess.run(
-                ['ping', '-n', '1', '-w', '1000', target],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW, check=False
+            subprocess.Popen(
+                ['cmd.exe', '/k', 'ping', '-n', '4', '-w', '1000', target],
+                creationflags=subprocess.CREATE_NEW_CONSOLE
             )
-            if result.returncode == 0:
-                return True, None
-            return False, result.stdout.decode('cp866', errors='replace').strip() or 'Хост недоступен.'
+            return True, None
         except Exception as exc:
             return False, str(exc)
 
     @staticmethod
     def run_ipconfig():
+        """Открывает отдельную консоль Windows и выполняет ipconfig /all."""
         try:
-            result = subprocess.run(
-                ['ipconfig', '/all'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW, check=False
+            subprocess.Popen(
+                ['cmd.exe', '/k', 'ipconfig', '/all'],
+                creationflags=subprocess.CREATE_NEW_CONSOLE
             )
-            output = result.stdout.decode('cp866', errors='replace')
-            if result.returncode == 0:
-                QtWidgets.QMessageBox.information(None, 'IPConfig', output)
-                return True, None
-            return False, result.stderr.decode('cp866', errors='replace')
+            return True, None
         except Exception as exc:
             return False, str(exc)
+
+    @staticmethod
+    def get_gateway_for_interface(interface):
+        safe = interface.replace("'", "''")
+        script = "$Name='__NAME__'; $a=Get-NetAdapter -Name $Name -ErrorAction SilentlyContinue; if($a){$r=Get-NetRoute -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1; if($r){$r.NextHop}}".replace('__NAME__', safe)
+        data = NetworkManager._powershell_json(script)
+        if isinstance(data, str):
+            return data.strip()
+        return ''
+
+    @staticmethod
+    def check_subnet_overlap(interface, ip, mask):
+        try:
+            candidate = ipaddress.ip_network(f'{ip}/{mask}', strict=False)
+        except ValueError:
+            return False
+        for item in NetworkManager.get_all_active_configs():
+            if item.get('interface') == interface or not item.get('ip') or not item.get('mask'):
+                continue
+            try:
+                network = ipaddress.ip_network(f"{item['ip']}/{item['mask']}", strict=False)
+                if candidate.overlaps(network):
+                    return True
+            except ValueError:
+                continue
+        return False
 
 
 class NetworkRefreshWorker(QtCore.QObject):
@@ -276,8 +261,8 @@ class NetworkRefreshWorker(QtCore.QObject):
     @QtCore.Slot()
     def run(self):
         try:
-            interfaces = NetworkManager.get_interfaces(force=True)
-            active = NetworkManager.get_all_active_configs(force=True)
+            interfaces = NetworkManager.get_interfaces()
+            active = NetworkManager.get_all_active_configs()
             self.finished.emit(interfaces, active)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -306,21 +291,10 @@ class ConfigManager:
 
     def save(self, data):
         try:
-            directory = os.path.dirname(os.path.abspath(self.config_file)) or '.'
-            os.makedirs(directory, exist_ok=True)
-            tmp = self.config_file + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.config_file)
             return True, None
         except Exception as e:
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except Exception:
-                pass
             return False, str(e)
 
 
@@ -330,7 +304,25 @@ class ActiveConfigWidget(QtWidgets.QFrame):
     def __init__(self, config_data, parent=None):
         super().__init__(parent)
         self.config_data = config_data
+        self.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
         self.init_ui()
+
+    def show_context_menu(self, position):
+        menu = QtWidgets.QMenu(self)
+        ping_action = menu.addAction('Пинг шлюза')
+        create_action = menu.addAction('Создать конфигурацию')
+        gateway = str(self.config_data.get('gateway') or '').strip()
+        ping_action.setEnabled(bool(gateway))
+        action = menu.exec(self.mapToGlobal(position))
+        if action == ping_action:
+            parent = self.window()
+            if hasattr(parent, 'ping_active_gateway'):
+                parent.ping_active_gateway(self.config_data)
+        elif action == create_action:
+            parent = self.window()
+            if hasattr(parent, 'create_configuration_from_active'):
+                parent.create_configuration_from_active(self.config_data)
 
     def init_ui(self):
         self.setFrameStyle(QtWidgets.QFrame.StyledPanel | QtWidgets.QFrame.Raised)
@@ -427,13 +419,9 @@ class ConfigWidget(QtWidgets.QWidget):
         current_text = self.interface_combo.currentText()
         if interfaces is None:
             interfaces = self.network_manager.get_interfaces()
-        interfaces = list(interfaces or [])
-        existing = [self.interface_combo.itemText(i) for i in range(self.interface_combo.count())]
-        if existing == interfaces:
-            return
         self.interface_combo.blockSignals(True)
         self.interface_combo.clear()
-        self.interface_combo.addItems(interfaces)
+        self.interface_combo.addItems(interfaces or [])
         wanted = current_text or self.config.get('interface', '')
         if wanted and wanted in (interfaces or []):
             self.interface_combo.setCurrentText(wanted)
@@ -695,12 +683,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.network_snapshot = {}
         self._refresh_thread = None
         self._refresh_worker = None
-        self._resize_timer = QtCore.QTimer(self)
-        self._resize_timer.setSingleShot(True)
-        self._resize_timer.timeout.connect(self._rebuild_if_columns_changed)
-        self._current_columns = 0
-        self._active_signature = None
-        self._active_widgets = {}
+        self._last_grid_columns = None
         self.init_ui()
         self.load_configurations()
         QtCore.QTimer.singleShot(0, self.refresh_network_state_async)
@@ -848,23 +831,17 @@ class MainWindow(QtWidgets.QMainWindow):
     def ping_gateway(self):
         active_configs = list(self.network_snapshot.values())
         if not active_configs:
-            # Только если кэш пуст, обновляем сеть. Это редкий путь.
             active_configs = self.network_manager.get_all_active_configs()
-
-        if not active_configs:
-            QtWidgets.QMessageBox.information(self, 'Информация', 'Нет активных сетевых подключений.')
-            return
-
+        gateways = []
         for config in active_configs:
-            gateway = config['gateway']
-            if gateway:
-                self.network_manager.ping_host(gateway)
-            elif config['ip'] and not config['dhcp']:
-                self.network_manager.ping_host(config['ip'])
-            elif config['dhcp'] and config['ip']:
-                gw = self.network_manager.get_gateway_for_interface(config['interface'])
-                if gw:
-                    self.network_manager.ping_host(gw)
+            gateway = str(config.get('gateway') or '').strip()
+            if gateway and gateway not in gateways:
+                gateways.append(gateway)
+        if not gateways:
+            QtWidgets.QMessageBox.information(self, 'Пинг шлюза', 'У активных интерфейсов не найдено ни одного шлюза.')
+            return
+        for gateway in gateways:
+            self.network_manager.ping_host(gateway)
 
     def show_ipconfig(self):
         success, error = self.network_manager.run_ipconfig()
@@ -936,24 +913,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def rebuild_layout(self):
         widgets = self.get_all_config_widgets()
-        columns = self.get_columns_count()
-        if not widgets or columns == self._current_columns:
-            return
-        self._current_columns = columns
-        self.scroll_content.setUpdatesEnabled(False)
-        try:
-            for i in range(self.scroll_layout.count() - 1, -1, -1):
-                item = self.scroll_layout.itemAt(i)
-                if item is not None and item.widget() is not None:
-                    self.scroll_layout.removeWidget(item.widget())
-            for idx, widget in enumerate(widgets):
-                self.scroll_layout.addWidget(widget, idx // columns, idx % columns)
-        finally:
-            self.scroll_content.setUpdatesEnabled(True)
+        for i in range(self.scroll_layout.count() - 1, -1, -1):
+            item = self.scroll_layout.itemAt(i)
+            if item is not None:
+                w = item.widget()
+                if w is not None:
+                    self.scroll_layout.removeWidget(w)
+
+        for idx, widget in enumerate(widgets):
+            columns = self.get_columns_count()
+            row = idx // columns
+            col = idx % columns
+            self.scroll_layout.addWidget(widget, row, col)
 
     def get_columns_count(self):
-        width = max(1, self.scroll_area.viewport().width())
-        widget_width = 210
+        width = self.scroll_area.width()
+        widget_width = 200 + 10
         columns = max(1, width // widget_width)
         return columns
 
@@ -972,15 +947,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.resize(window_size['width'], window_size['height'])
 
         configs = data.get('configs', [])
-        self.scroll_content.setUpdatesEnabled(False)
-        try:
-            for config in configs:
-                config_widget = ConfigWidget(config, self, parent=self.scroll_content)
-                self.scroll_layout.addWidget(config_widget)
-        finally:
-            self.scroll_content.setUpdatesEnabled(True)
-        self._current_columns = 0
-        self.rebuild_layout()
+        for config in configs:
+            config_widget = ConfigWidget(config, self, parent=self.scroll_content)
+            self.add_config_widget(config_widget)
+
         self.update_active_configs_display()
 
     def save_configurations(self):
@@ -1006,27 +976,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._render_active_configs(list(self.network_snapshot.values()))
 
     def _render_active_configs(self, active_configs):
-        active_configs = list(active_configs or [])
-        signature = tuple((x.get('interface'), x.get('ip'), x.get('mask'), x.get('gateway'), x.get('dhcp')) for x in active_configs)
-        if signature == self._active_signature:
+        while self.active_configs_layout.count():
+            item = self.active_configs_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        if not active_configs:
+            label = QtWidgets.QLabel("Нет активных сетевых подключений")
+            label.setStyleSheet("color: gray; font-style: italic; padding: 5px;")
+            self.active_configs_layout.addWidget(label)
             return
-        self._active_signature = signature
-        self.active_configs_group.setUpdatesEnabled(False)
-        try:
-            while self.active_configs_layout.count():
-                item = self.active_configs_layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    widget.deleteLater()
-            if not active_configs:
-                label = QtWidgets.QLabel("Нет активных сетевых подключений")
-                label.setStyleSheet("color: gray; font-style: italic; padding: 5px;")
-                self.active_configs_layout.addWidget(label)
-                return
-            for config_data in active_configs:
-                self.active_configs_layout.addWidget(ActiveConfigWidget(config_data))
-        finally:
-            self.active_configs_group.setUpdatesEnabled(True)
+
+        for config_data in active_configs:
+            self.active_configs_layout.addWidget(ActiveConfigWidget(config_data))
 
     def update_all_statuses(self):
         for widget in self.get_all_config_widgets():
@@ -1054,10 +1017,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._resize_timer.start(80)
-
-    def _rebuild_if_columns_changed(self):
-        self.rebuild_layout()
+        QtCore.QTimer.singleShot(50, self.rebuild_layout)
 
     def closeEvent(self, event):
         self.save_configurations()
