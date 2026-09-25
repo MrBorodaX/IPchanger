@@ -11,8 +11,8 @@ from PySide6 import QtWidgets, QtCore, QtGui
 
 CONFIG_FILE = 'configurations.json'
 APP_NAME = "IPChanger"
-APP_VERSION = "3.0.0"
-DATE = "20.09.2026"
+APP_VERSION = "3.0.0 beta"
+DATE = "25.09.2026"
 
 # Пастельные цвета
 COLOR_ACTIVE = "#B8E6B8"
@@ -899,6 +899,12 @@ class MainWindow(QtWidgets.QMainWindow):
             f'Разработчик: MrBorodaX\n'
             f'{APP_NAME} v{APP_VERSION}\n'
             f'Дата обновления: {DATE}\n'
+            f'\n'
+            f'Copyright © 2026 MrBorodaX.\n'
+            f'This program is free software: you can redistribute it and/or modify it \n'
+            f'under the terms of the GNU General Public License as published by the \n'
+            f'Free Software Foundation, either version 3 of the License, or (at your \n'
+            f'option) any later version.'
         )
 
     def add_configuration(self):
