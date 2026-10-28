@@ -11,8 +11,8 @@ from PySide6 import QtWidgets, QtCore, QtGui
 
 CONFIG_FILE = 'configurations.json'
 APP_NAME = "IPChanger"
-APP_VERSION = "3.0.0 beta"
-DATE = "25.09.2026"
+APP_VERSION = "3.0.1"
+DATE = "28.10.2026"
 
 # Пастельные цвета
 COLOR_ACTIVE = "#B8E6B8"
@@ -100,20 +100,20 @@ $items = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Select-Object 
     def get_all_active_configs():
         script = """
 $result = foreach ($a in Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object {$_.Status -eq 'Up'}) {
-    $ipObj = Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object {$_.IPAddress -notlike '169.254.*'} | Select-Object -First 1
-    $gwObj = Get-NetRoute -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-        Sort-Object RouteMetric | Select-Object -First 1
-    $ipIf = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    [PSCustomObject]@{
-        interface = [string]$a.Name
-        description = [string]$a.InterfaceDescription
-        status = [string]$a.Status
-        ip = if ($ipObj) { [string]$ipObj.IPAddress } else { '' }
-        prefix = if ($ipObj) { [int]$ipObj.PrefixLength } else { $null }
-        gateway = if ($gwObj) { [string]$gwObj.NextHop } else { '' }
-        dhcp = if ($ipIf) { ([string]$ipIf.Dhcp -eq 'Enabled') } else { $false }
-    }
+$ipObj = Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+Where-Object {$_.IPAddress -notlike '169.254.*'} | Select-Object -First 1
+$gwObj = Get-NetRoute -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+Sort-Object RouteMetric | Select-Object -First 1
+$ipIf = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+[PSCustomObject]@{
+interface = [string]$a.Name
+description = [string]$a.InterfaceDescription
+status = [string]$a.Status
+ip = if ($ipObj) { [string]$ipObj.IPAddress } else { '' }
+prefix = if ($ipObj) { [int]$ipObj.PrefixLength } else { $null }
+gateway = if ($gwObj) { [string]$gwObj.NextHop } else { '' }
+dhcp = if ($ipIf) { ([string]$ipIf.Dhcp -eq 'Enabled') } else { $false }
+}
 }
 if ($null -eq $result) { @() | ConvertTo-Json -Compress } else { @($result) | ConvertTo-Json -Compress -Depth 4 }
 """
@@ -139,6 +139,7 @@ if ($null -eq $result) { @() | ConvertTo-Json -Compress } else { @($result) | Co
                 'mask': mask,
                 'gateway': str(item.get('gateway') or ''),
                 'dhcp': bool(item.get('dhcp', False)),
+                'status': str(item.get('status') or ''),
             })
         return active
 
@@ -146,13 +147,13 @@ if ($null -eq $result) { @() | ConvertTo-Json -Compress } else { @($result) | Co
     def get_interface_config(interface):
         safe = interface.replace("'", "''")
         script = """
-$Name = '__NAME__'
+$Name = 'NAME'
 $a = Get-NetAdapter -Name $Name -ErrorAction Stop
 $ipObj = Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.IPAddress -notlike '169.254.*'} | Select-Object -First 1
 $gwObj = Get-NetRoute -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
 $ipIf = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
 [PSCustomObject]@{dhcp_enabled=if($ipIf){([string]$ipIf.Dhcp -eq 'Enabled')}else{$false}; ip=if($ipObj){[string]$ipObj.IPAddress}else{''}; mask=if($ipObj){[string]$ipObj.PrefixLength}else{''}; gateway=if($gwObj){[string]$gwObj.NextHop}else{''}} | ConvertTo-Json -Compress
-""".replace('__NAME__', safe)
+""".replace('NAME', safe)
         data = NetworkManager._powershell_json(script)
         if not isinstance(data, dict):
             return None
@@ -200,7 +201,6 @@ $ipIf = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -Error
             return False, error
         except Exception as e:
             return False, str(e)
-
 
     @staticmethod
     def ping_host(target):
@@ -268,8 +268,6 @@ class NetworkRefreshWorker(QtCore.QObject):
             self.failed.emit(str(exc))
 
 
-
-
 class ConfigManager:
     """Класс для работы с файлом конфигураций"""
 
@@ -279,7 +277,6 @@ class ConfigManager:
     def load(self):
         if not os.path.exists(self.config_file):
             return {'window_size': {}, 'configs': []}
-
         try:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
@@ -299,7 +296,9 @@ class ConfigManager:
 
 
 class ActiveConfigWidget(QtWidgets.QFrame):
-    """Виджет для отображения активной конфигурации"""
+    """Карточка активного сетевого интерфейса."""
+    gateway_ping_requested = QtCore.Signal(dict)
+    create_config_requested = QtCore.Signal(dict)
 
     def __init__(self, config_data, parent=None):
         super().__init__(parent)
@@ -316,32 +315,27 @@ class ActiveConfigWidget(QtWidgets.QFrame):
         ping_action.setEnabled(bool(gateway))
         action = menu.exec(self.mapToGlobal(position))
         if action == ping_action:
-            parent = self.window()
-            if hasattr(parent, 'ping_active_gateway'):
-                parent.ping_active_gateway(self.config_data)
+            self.gateway_ping_requested.emit(dict(self.config_data))
         elif action == create_action:
-            parent = self.window()
-            if hasattr(parent, 'create_configuration_from_active'):
-                parent.create_configuration_from_active(self.config_data)
+            self.create_config_requested.emit(dict(self.config_data))
 
     def init_ui(self):
         self.setFrameStyle(QtWidgets.QFrame.StyledPanel | QtWidgets.QFrame.Raised)
         self.setStyleSheet("""
             QFrame {
-                background-color: #E8F4FD;
-                border: 1px solid #A8D4F0;
-                border-radius: 4px;
+                background-color: #1F2937;
+                border: 1px solid #374151;
+                border-radius: 6px;
+            }
+            QFrame:hover {
+                border: 1px solid #4B5563;
             }
         """)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 6, 10, 6)
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setSpacing(2)
-        layout.setContentsMargins(8, 6, 8, 6)
-
-        interface_label = QtWidgets.QLabel(f"<b>{self.config_data['interface']}</b>")
-        interface_label.setStyleSheet("color: #2C5F8A; font-weight: bold; font-size: 11px;")
-        layout.addWidget(interface_label)
-
+        # Формируем текст IP
         if self.config_data['dhcp']:
             ip_text = "DHCP"
         else:
@@ -354,14 +348,21 @@ class ActiveConfigWidget(QtWidgets.QFrame):
                 except Exception:
                     pass
 
-        ip_label = QtWidgets.QLabel(f"IP: {ip_text}")
-        ip_label.setStyleSheet("color: #3A6B8C; font-size: 10px;")
-        layout.addWidget(ip_label)
+        # Формируем текст шлюза
+        gateway_text = self.config_data.get('gateway', '')
 
-        if self.config_data['gateway']:
-            gateway_label = QtWidgets.QLabel(f"Шлюз: {self.config_data['gateway']}")
-            gateway_label.setStyleSheet("color: #3A6B8C; font-size: 10px;")
-            layout.addWidget(gateway_label)
+        # Создаём одну строку: Адаптер IP Шлюз
+        if gateway_text:
+            full_text = f"<b>{self.config_data['interface']}:</b> &nbsp; {ip_text} &nbsp; | &nbsp; {gateway_text}"
+        else:
+            full_text = f"<b>{self.config_data['interface']}</b> &nbsp; {ip_text}"
+
+        info_label = QtWidgets.QLabel(full_text)
+        info_label.setStyleSheet("color: #F9FAFB; font-size: 11px;")
+        info_label.setTextFormat(QtCore.Qt.RichText)
+        layout.addWidget(info_label)
+        info_label.adjustSize()
+        self.adjustSize()
 
 
 class ConfigWidget(QtWidgets.QWidget):
@@ -438,13 +439,20 @@ class ConfigWidget(QtWidgets.QWidget):
         """
 
     def replace_commas(self):
+        """Заменяет разделители IPv4 без перемещения курсора ввода."""
         sender = self.sender()
+        if not isinstance(sender, QtWidgets.QLineEdit):
+            return
         text = sender.text()
-        if ',' in text:
-            new_text = text.replace(',', '.')
+        new_text = text.translate(str.maketrans({',': '.', 'ю': '.', 'Ю': '.'}))
+        if new_text != text:
+            cursor = sender.cursorPosition()
             sender.blockSignals(True)
-            sender.setText(new_text)
-            sender.blockSignals(False)
+            try:
+                sender.setText(new_text)
+                sender.setCursorPosition(cursor)
+            finally:
+                sender.blockSignals(False)
 
     def calculate_mask(self):
         ip_text = self.ip_input.text()
@@ -475,11 +483,9 @@ class ConfigWidget(QtWidgets.QWidget):
             if not all([ip, mask]):
                 QtWidgets.QMessageBox.warning(self, 'Ошибка', 'Пожалуйста, заполните поля IP-адреса и маски или установите DHCP.')
                 return
-
             if self.network_manager.check_subnet_overlap(interface, ip, mask):
                 QtWidgets.QMessageBox.warning(self, 'Ошибка', 'Подсеть пересекается с другими интерфейсами.')
                 return
-
             success, error = self.network_manager.apply_config(interface, ip, mask, gateway)
 
         if success:
@@ -665,7 +671,7 @@ class ConfigWidget(QtWidgets.QWidget):
 
         if ip_matches and connected:
             self.main_window.register_active_config(interface, self)
-        elif ip_matches:
+        elif connected:
             self.set_error()
         else:
             self.set_inactive()
@@ -686,7 +692,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_grid_columns = None
         self.init_ui()
         self.load_configurations()
-        QtCore.QTimer.singleShot(0, self.refresh_network_state_async)
+        QtCore.QTimer.singleShot(100, self.refresh_network_state_async)
 
     def init_ui(self):
         self.setWindowTitle(APP_NAME)
@@ -702,7 +708,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.create_menu_bar()
 
         self.active_configs_group = QtWidgets.QGroupBox("Активные сетевые конфигурации")
-        self.active_configs_layout = QtWidgets.QHBoxLayout()
+        self.active_configs_layout = QtWidgets.QGridLayout()
+        self.active_configs_layout.setSpacing(8)
+        self.active_configs_layout.setContentsMargins(8, 8, 8, 8)
         self.active_configs_layout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         self.active_configs_group.setLayout(self.active_configs_layout)
         main_layout.addWidget(self.active_configs_group)
@@ -764,10 +772,13 @@ class MainWindow(QtWidgets.QMainWindow):
         refresh_action.triggered.connect(self.refresh_all_interfaces)
         network_menu.addAction(refresh_action)
 
-        ping_gateway_action = QtGui.QAction('Пинг шлюза', self)
-        ping_gateway_action.setShortcut('Ctrl+P')
-        ping_gateway_action.triggered.connect(self.ping_gateway)
-        network_menu.addAction(ping_gateway_action)
+        self.ping_menu = network_menu.addMenu('Пинг')
+        self.ping_menu.aboutToShow.connect(self.populate_ping_menu)
+
+        masks_action = QtGui.QAction('Маски', self)
+        masks_action.triggered.connect(self.show_masks)
+        network_menu.addAction(masks_action)
+
 
         ipconfig_action = QtGui.QAction('IPConfig', self)
         ipconfig_action.setShortcut('Ctrl+I')
@@ -792,7 +803,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def refresh_network_state_async(self):
         if self._refresh_thread is not None and self._refresh_thread.isRunning():
             return
-
         self.statusBar().showMessage('Обновление адаптеров...')
         self._refresh_thread = QtCore.QThread(self)
         self._refresh_worker = NetworkRefreshWorker()
@@ -810,11 +820,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_network_refresh_finished(self, interfaces, active_configs):
         self.interfaces_cache = list(interfaces or [])
         self.network_snapshot = {item.get('interface'): item for item in (active_configs or []) if item.get('interface')}
-
         for widget in self.get_all_config_widgets():
             widget.refresh_interfaces(self.interfaces_cache)
             widget.update_status()
-
         self._render_active_configs(active_configs)
         self.statusBar().showMessage('Адаптеры обновлены', 2000)
 
@@ -829,19 +837,138 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_thread = None
 
     def ping_gateway(self):
-        active_configs = list(self.network_snapshot.values())
-        if not active_configs:
-            active_configs = self.network_manager.get_all_active_configs()
+        """Пинг всех найденных шлюзов через отдельные окна CMD."""
         gateways = []
-        for config in active_configs:
-            gateway = str(config.get('gateway') or '').strip()
+        for item in self.network_snapshot.values():
+            gateway = str(item.get('gateway') or '').strip()
             if gateway and gateway not in gateways:
                 gateways.append(gateway)
         if not gateways:
             QtWidgets.QMessageBox.information(self, 'Пинг шлюза', 'У активных интерфейсов не найдено ни одного шлюза.')
             return
         for gateway in gateways:
-            self.network_manager.ping_host(gateway)
+            self._ping_gateway_in_console(gateway)
+
+    def populate_ping_menu(self):
+        """Заполняет меню «Сеть -> Пинг» текущими активными интерфейсами."""
+        if not hasattr(self, "ping_menu"):
+            return
+        self.ping_menu.clear()
+        active_configs = list(getattr(self, "network_snapshot", {}).values())
+        if not active_configs:
+            action = self.ping_menu.addAction("Нет активных интерфейсов")
+            action.setEnabled(False)
+            return
+        added = False
+        for config in active_configs:
+            interface = str(config.get("interface") or "").strip()
+            gateway = str(config.get("gateway") or "").strip()
+            if not interface:
+                continue
+            if gateway:
+                action = self.ping_menu.addAction(f"{interface} — {gateway}")
+                action.setData(gateway)
+                action.triggered.connect(self.ping_selected_gateway)
+                added = True
+            else:
+                action = self.ping_menu.addAction(f"{interface} — шлюз не найден")
+                action.setEnabled(False)
+        if not added:
+            action = self.ping_menu.addAction("У активных интерфейсов нет шлюзов")
+            action.setEnabled(False)
+
+    def ping_selected_gateway(self):
+        """Обрабатывает выбор шлюза из меню «Сеть -> Пинг»."""
+        action = self.sender()
+        if not isinstance(action, QtGui.QAction):
+            return
+        gateway = str(action.data() or "").strip()
+        if gateway:
+            self._ping_gateway_in_console(gateway)
+
+    def _ping_gateway_in_console(self, gateway):
+        """Запускает ping шлюза в отдельном окне Windows CMD."""
+        gateway = str(gateway or "").strip()
+        if not gateway:
+            return
+        try:
+            subprocess.Popen(
+                ["cmd.exe", "/k", "ping", "-n", "4", "-w", "1000", gateway],
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(
+                self, "Ошибка", f"Не удалось запустить ping шлюза {gateway}.\n{e}"
+            )
+
+    def ping_active_gateway(self, config_data):
+        """ПКМ по активному интерфейсу -> Пинг шлюза."""
+        config_data = config_data or {}
+        gateway = str(config_data.get("gateway") or "").strip()
+        interface = str(config_data.get("interface") or "").strip()
+        if not gateway and interface:
+            try:
+                gateway = str(self.network_manager.get_gateway_for_interface(interface) or "").strip()
+            except Exception:
+                gateway = ""
+        if not gateway:
+            QtWidgets.QMessageBox.information(self, "Пинг шлюза", f"Для интерфейса «{interface}» шлюз не найден.")
+            return
+        self._ping_gateway_in_console(gateway)
+
+    def create_configuration_from_active(self, config_data):
+        """ПКМ по активному интерфейсу -> Создать конфигурацию."""
+        config_data = config_data or {}
+        interface = str(config_data.get("interface") or "").strip()
+        if not interface:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Не удалось определить сетевой интерфейс.")
+            return
+        if bool(config_data.get("dhcp")):
+            ip = "DHCP"
+            mask = "DHCP"
+            gateway = "DHCP"
+        else:
+            ip = str(config_data.get("ip") or "").strip()
+            mask = str(config_data.get("mask") or "").strip()
+            gateway = str(config_data.get("gateway") or "").strip()
+
+        existing_names = set()
+        for i in range(self.scroll_layout.count()):
+            item = self.scroll_layout.itemAt(i)
+            widget = item.widget()
+            if not isinstance(widget, ConfigWidget):
+                continue
+            try:
+                config = widget.get_config()
+                if isinstance(config, dict):
+                    name = str(config.get("name") or "").strip()
+                    if name:
+                        existing_names.add(name)
+            except Exception:
+                pass
+
+        name = interface
+        counter = 1
+        while name in existing_names:
+            name = f"{interface} ({counter})"
+            counter += 1
+
+        config = {
+            "name": name,
+            "interface": interface,
+            "ip": ip,
+            "mask": mask,
+            "gateway": gateway,
+        }
+        try:
+            widget = ConfigWidget(config, self, parent=self.scroll_content)
+            self.add_config_widget(widget)
+            if hasattr(self, "rebuild_layout"):
+                self.rebuild_layout()
+            self.save_configurations()
+            self.statusBar().showMessage(f"Создана конфигурация «{name}» из активного интерфейса", 3000)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", f"Не удалось создать конфигурацию.\n{e}")
 
     def show_ipconfig(self):
         success, error = self.network_manager.run_ipconfig()
@@ -852,16 +979,12 @@ class MainWindow(QtWidgets.QMainWindow):
         widgets = self.get_all_config_widgets()
         for widget in widgets:
             widget.deleteLater()
-
         self.interface_to_active_config.clear()
         QtCore.QTimer.singleShot(50, lambda: self.add_configuration())
 
     def open_configurations(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            'Открыть конфигурации',
-            '',
-            'JSON Files (*.json);;All Files (*)'
+            self, 'Открыть конфигурации', '', 'JSON Files (*.json);;All Files (*)'
         )
         if file_path:
             self.config_manager.config_file = file_path
@@ -869,10 +992,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def save_configurations_as(self):
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            'Сохранить конфигурации как',
-            '',
-            'JSON Files (*.json);;All Files (*)'
+            self, 'Сохранить конфигурации как', '', 'JSON Files (*.json);;All Files (*)'
         )
         if file_path:
             self.config_manager.config_file = file_path
@@ -880,8 +1000,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def show_help(self):
         QtWidgets.QMessageBox.information(
-            self,
-            'Справка',
+            self, 'Справка',
             'IPChanger - программа для управления сетевыми конфигурациями.\n\n'
             'Использование:\n'
             '- Двойной клик по заголовку конфигурации - применить\n'
@@ -894,8 +1013,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def show_about(self):
         QtWidgets.QMessageBox.about(
-            self,
-            'О программе',
+            self, 'О программе',
             f'Разработчик: MrBorodaX\n'
             f'{APP_NAME} v{APP_VERSION}\n'
             f'Дата обновления: {DATE}\n'
@@ -906,6 +1024,148 @@ class MainWindow(QtWidgets.QMainWindow):
             f'Free Software Foundation, either version 3 of the License, or (at your \n'
             f'option) any later version.'
         )
+
+    def show_masks(self):
+        """Показать таблицу масок подсети в красивом виде."""
+        masks = [
+            ('255.255.255.255', '/32', '1'),
+            ('255.255.255.254', '/31', '2'),
+            ('255.255.255.252', '/30', '2'),
+            ('255.255.255.248', '/29', '6'),
+            ('255.255.255.240', '/28', '14'),
+            ('255.255.255.224', '/27', '30'),
+            ('255.255.255.192', '/26', '62'),
+            ('255.255.255.128', '/25', '126'),
+            ('255.255.255.0', '/24', '254'),
+            ('255.255.254.0', '/23', '510'),
+            ('255.255.252.0', '/22', '1 022'),
+            ('255.255.248.0', '/21', '2 046'),
+            ('255.255.240.0', '/20', '4 094'),
+            ('255.255.224.0', '/19', '8 190'),
+            ('255.255.192.0', '/18', '16 382'),
+            ('255.255.128.0', '/17', '32 766'),
+            ('255.255.0.0', '/16', '65 534'),
+            ('255.254.0.0', '/15', '131 070'),
+            ('255.252.0.0', '/14', '262 142'),
+            ('255.248.0.0', '/13', '524 286'),
+            ('255.240.0.0', '/12', '1 048 574'),
+            ('255.224.0.0', '/11', '2 097 150'),
+            ('255.192.0.0', '/10', '4 194 302'),
+            ('255.128.0.0', '/9', '8 388 606'),
+            ('255.0.0.0', '/8', '16 777 214'),
+        ]
+
+        # Создаём диалоговое окно
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle('Маски подсети IPv4')
+        dialog.setMinimumSize(500, 600)
+        dialog.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        # Заголовок
+        title = QtWidgets.QLabel('Таблица масок подсети IPv4')
+        title.setStyleSheet("font-size: 14px; font-weight: bold; padding: 10px;")
+        title.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(title)
+
+        # Создаём таблицу
+        table = QtWidgets.QTableWidget()
+        table.setRowCount(len(masks))
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(['Маска подсети', 'CIDR', 'Хостов'])
+
+        # Настройка таблицы
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(True)
+
+        # В некоторых темах Windows AlternateBase остаётся белым даже при
+        # тёмном Base. Поэтому не используем его напрямую.
+        palette = dialog.palette()
+        base = palette.color(QtGui.QPalette.ColorRole.Base)
+        # Если Base и Window расходятся по яркости, ориентируемся на фон окна.
+        window = palette.color(QtGui.QPalette.ColorRole.Window)
+        if (base.lightness() < 128) != (window.lightness() < 128):
+            base = window
+        dark_theme = base.lightness() < 128
+        alternate = base.lighter(115) if dark_theme else base.darker(106)
+        text_color = QtGui.QColor('#FFFFFF') if dark_theme else QtGui.QColor('#111111')
+        window_text = text_color
+        highlight = palette.color(QtGui.QPalette.ColorRole.Highlight)
+        highlighted_text = palette.color(QtGui.QPalette.ColorRole.HighlightedText)
+        border = palette.color(QtGui.QPalette.ColorRole.Mid)
+
+        def css_color(color):
+            return color.name(QtGui.QColor.NameFormat.HexRgb)
+
+        table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {css_color(base)};
+                alternate-background-color: {css_color(alternate)};
+                color: {css_color(text_color)};
+                border: 1px solid {css_color(border)};
+                gridline-color: {css_color(border)};
+                font-size: 11px;
+            }}
+            QTableWidget::item {{ padding: 5px; }}
+            QTableWidget::item:selected {{
+                background-color: {css_color(highlight)};
+                color: {css_color(highlighted_text)};
+            }}
+            QHeaderView::section {{
+                background-color: {css_color(window)};
+                color: {css_color(window_text)};
+                padding: 8px;
+                border: 1px solid {css_color(border)};
+                font-weight: bold;
+                font-size: 12px;
+            }}
+        """)
+
+        table_palette = table.palette()
+        table_palette.setColor(QtGui.QPalette.ColorRole.Base, base)
+        table_palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, alternate)
+        table_palette.setColor(QtGui.QPalette.ColorRole.Text, text_color)
+        table.setPalette(table_palette)
+
+        # Заполняем таблицу
+        for row, (mask, cidr, hosts) in enumerate(masks):
+            table.setItem(row, 0, QtWidgets.QTableWidgetItem(mask))
+            table.setItem(row, 1, QtWidgets.QTableWidgetItem(cidr))
+            table.setItem(row, 2, QtWidgets.QTableWidgetItem(hosts))
+
+        # Выравнивание по центру для CIDR и Хостов
+        for row in range(len(masks)):
+            for col in [1, 2]:
+                item = table.item(row, col)
+                if item:
+                    item.setTextAlignment(QtCore.Qt.AlignCenter)
+
+        layout.addWidget(table)
+
+        # Кнопка закрытия
+        close_button = QtWidgets.QPushButton('Закрыть')
+        close_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3B82F6;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #2563EB;
+            }
+        """)
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button, alignment=QtCore.Qt.AlignCenter)
+
+        dialog.exec()
 
     def add_configuration(self):
         config_widget = ConfigWidget({}, self, parent=self.scroll_content)
@@ -925,7 +1185,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 w = item.widget()
                 if w is not None:
                     self.scroll_layout.removeWidget(w)
-
         for idx, widget in enumerate(widgets):
             columns = self.get_columns_count()
             row = idx // columns
@@ -947,32 +1206,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def load_configurations(self):
         data = self.config_manager.load()
-
         window_size = data.get('window_size', {})
         if 'width' in window_size and 'height' in window_size:
             self.resize(window_size['width'], window_size['height'])
-
         configs = data.get('configs', [])
         for config in configs:
             config_widget = ConfigWidget(config, self, parent=self.scroll_content)
             self.add_config_widget(config_widget)
-
         self.update_active_configs_display()
 
     def save_configurations(self):
         configs = []
         for widget in self.get_all_config_widgets():
             configs.append(widget.get_config())
-
-        window_size = {
-            "width": self.width(),
-            "height": self.height()
-        }
-        data = {
-            "window_size": window_size,
-            "configs": configs
-        }
-
+        window_size = {"width": self.width(), "height": self.height()}
+        data = {"window_size": window_size, "configs": configs}
         success, error = self.config_manager.save(data)
         if not success:
             QtWidgets.QMessageBox.warning(self, 'Ошибка', f'Не удалось сохранить конфигурации.\n{error}')
@@ -987,15 +1235,29 @@ class MainWindow(QtWidgets.QMainWindow):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-
         if not active_configs:
             label = QtWidgets.QLabel("Нет активных сетевых подключений")
-            label.setStyleSheet("color: gray; font-style: italic; padding: 5px;")
-            self.active_configs_layout.addWidget(label)
+            label.setStyleSheet("color: #9CA3AF; font-style: italic; padding: 5px;")
+            self.active_configs_layout.addWidget(label, 0, 0)
             return
-
+        available = max(220, self.active_configs_group.width() - 20)
+        card_widths = []
         for config_data in active_configs:
-            self.active_configs_layout.addWidget(ActiveConfigWidget(config_data))
+            probe = ActiveConfigWidget(config_data)
+            probe.adjustSize()
+            card_widths.append(max(160, probe.sizeHint().width()))
+            probe.deleteLater()
+        card_width = max(card_widths or [220])
+        columns = max(1, available // card_width)
+        for i, config_data in enumerate(active_configs):
+            widget = ActiveConfigWidget(config_data)
+            widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum, QtWidgets.QSizePolicy.Policy.Fixed)
+            widget.adjustSize()
+            widget.gateway_ping_requested.connect(self.ping_active_gateway)
+            widget.create_config_requested.connect(self.create_configuration_from_active)
+            self.active_configs_layout.addWidget(widget, i // columns, i % columns)
+        for col in range(columns):
+            self.active_configs_layout.setColumnStretch(col, 0)
 
     def update_all_statuses(self):
         for widget in self.get_all_config_widgets():
@@ -1007,7 +1269,6 @@ class MainWindow(QtWidgets.QMainWindow):
             previous_config = self.interface_to_active_config[interface]
             if previous_config != config_widget:
                 previous_config.set_inactive()
-
         self.interface_to_active_config[interface] = config_widget
         config_widget.set_active()
 
@@ -1024,6 +1285,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         QtCore.QTimer.singleShot(50, self.rebuild_layout)
+        QtCore.QTimer.singleShot(50, self.update_active_configs_display)
 
     def closeEvent(self, event):
         self.save_configurations()
@@ -1033,14 +1295,30 @@ class MainWindow(QtWidgets.QMainWindow):
 def main():
     import traceback
     import ctypes
+    import os
     from PySide6 import QtGui
+
+    # ВАЖНО: SetCurrentProcessExplicitAppUserModelID должен быть ДО QApplication
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("IPChanger.App.1")
+    except Exception as e:
+        print(f"Не удалось установить AppUserModelID: {e}")
+
     try:
         app = QtWidgets.QApplication(sys.argv)
         app.setApplicationName(APP_NAME)
         app.setApplicationVersion(APP_VERSION)
 
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("IPChanger.App.1")
-        app.setWindowIcon(QtGui.QIcon('icon.ico'))
+        # Абсолютный путь к иконке
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.ico')
+        if not os.path.exists(icon_path):
+            print(f"Внимание: файл иконки не найден по пути {icon_path}")
+        else:
+            print(f"Иконка найдена: {icon_path}")
+
+        # Устанавливаем иконку на приложение
+        app_icon = QtGui.QIcon(icon_path)
+        app.setWindowIcon(app_icon)
 
         if not is_admin():
             reply = QtWidgets.QMessageBox.warning(
@@ -1058,6 +1336,9 @@ def main():
                 sys.exit(0)
 
         window = MainWindow()
+
+        # ВАЖНО: устанавливаем иконку и на само окно
+        window.setWindowIcon(app_icon)
         window.show()
 
         sys.exit(app.exec())
