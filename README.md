@@ -12,7 +12,13 @@ Create, save, and switch between static IPv4 and DHCP configurations without rep
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-41cd52?style=flat-square)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
-[Features](#-features) · [Getting started](#-getting-started) · [Usage](#-usage) · [Shortcuts](#-keyboard-shortcuts) · [Contributing](#-contributing)
+[Download EXE](https://github.com/MrBorodaX/IPchanger/releases/latest) · [Features](#-features) · [Getting started](#-getting-started) · [Usage](#-usage) · [Shortcuts](#-keyboard-shortcuts) · [Contributing](#-contributing)
+
+
+
+[![Download for Windows](https://img.shields.io/badge/Download_for_Windows-Latest_Release-2563eb?style=for-the-badge&logo=github&logoColor=white)](https://github.com/MrBorodaX/IPchanger/releases/latest)
+
+**For Windows users:** download the packaged executable from [GitHub Releases](https://github.com/MrBorodaX/IPchanger/releases/latest). No Python or PySide6 installation is needed. A release must be published with an EXE asset before this download option is available.
 
 </div>
 
@@ -62,7 +68,17 @@ IPChanger currently targets **Windows only**. The network-management backend is 
 
 ## 🚀 Getting started
 
-### 1. Clone the repository
+### Option A: Download the Windows executable (recommended)
+
+1. Open [the latest release](https://github.com/MrBorodaX/IPchanger/releases/latest).
+2. Download the `IPChanger.exe` asset (if published).
+3. Run it **as Administrator** to change network settings.
+
+The packaged executable does not require a separate Python or PySide6 installation. If your release includes additional files, keep them together as instructed in the release notes.
+
+### Option B: Run from source
+
+#### 1. Clone the repository
 
 ```powershell
 git clone https://github.com/MrBorodaX/IPchanger.git
@@ -71,7 +87,7 @@ cd IPchanger
 
 Alternatively, download the repository ZIP from GitHub.
 
-### 2. Create a virtual environment
+#### 2. Create a virtual environment
 
 ```powershell
 py -m venv .venv
@@ -80,7 +96,7 @@ py -m venv .venv
 
 If your PowerShell execution policy prevents activation, use `.\.venv\Scripts\python.exe` directly in the commands below.
 
-### 3. Install PySide6
+#### 3. Install PySide6
 
 ```powershell
 python -m pip install PySide6
@@ -88,7 +104,7 @@ python -m pip install PySide6
 
 The repository does not currently contain a `requirements.txt`; PySide6 is the only third-party Python package imported by the application.
 
-### 4. Run the application
+#### 4. Run the application
 
 ```powershell
 python main.py
@@ -197,7 +213,16 @@ IPChanger queries physical network adapters using Windows PowerShell (`Get-NetAd
 
 ## 📦 Build an executable (optional)
 
-You can try packaging the app with [PyInstaller](https://pyinstaller.org/):
+For a GUI-based build workflow, use [auto-py-to-exe](https://github.com/brentvollebregt/auto-py-to-exe), a graphical frontend for PyInstaller:
+
+```powershell
+python -m pip install auto-py-to-exe
+auto-py-to-exe
+```
+
+Choose the entry script (`main.py`), **One File**, **Window Based**, and `icon.ico` as the executable icon. Include `icon.ico` as an additional file if needed for the runtime window icon.
+
+Alternatively, you can try packaging the app directly with [PyInstaller](https://pyinstaller.org/):
 
 ```powershell
 python -m pip install pyinstaller
