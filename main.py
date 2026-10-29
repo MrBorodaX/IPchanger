@@ -1073,7 +1073,7 @@ class MainWindow(QtWidgets.QMainWindow):
         table = QtWidgets.QTableWidget()
         table.setRowCount(len(masks))
         table.setColumnCount(3)
-        table.setHorizontalHeaderLabels(['Маска подсети', 'CIDR', 'Хостов'])
+        table.setHorizontalHeaderLabels(['Маска подсети', 'CIDR', 'Доступно IP'])
 
         # Настройка таблицы
         table.horizontalHeader().setStretchLastSection(True)
